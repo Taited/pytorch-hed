@@ -1,35 +1,89 @@
 #!/usr/bin/env python
-
-import getopt
-import numpy
-import PIL
-import PIL.Image
-import sys
+import argparse
+import numpy as np
+from PIL import Image
 import torch
+import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import (
+    Compose, ToTensor, Resize, Normalize
+)
+import os
+import os.path as osp
+import tqdm
 
-##########################################################
+# requires at least pytorch version 1.3.0
+assert(int(str('').join(torch.__version__.split('.')[0:2])) >= 13)
+# do not compute gradients for computational performance
+torch.set_grad_enabled(False) 
+# use cudnn for computational performance
+torch.backends.cudnn.enabled = True
 
-assert(int(str('').join(torch.__version__.split('.')[0:2])) >= 13) # requires at least pytorch version 1.3.0
 
-torch.set_grad_enabled(False) # make sure to not compute gradients for computational performance
+def parse_args():
+    parser = argparse.ArgumentParser(description='Inference HED')
+    parser.add_argument(
+        '--gpu-id',
+        type=int,
+        default=4,
+        help='id of gpu to use ')
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=32,
+        help='id of gpu to use ')
+    parser.add_argument(
+        '--input-path',
+        type=str,
+        default='dataset/LSUN/church_outdoor/train/source')
+    parser.add_argument(
+        '--output-path',
+        type=str,
+        default='dataset/LSUN/church_outdoor/train/edge')
+    
+    args = parser.parse_args()
+    return args
+    
+    
+class DummyDataset(Dataset):
+    def __init__(self, data_root,
+                 transform=Compose([
+                     Resize([480, 320]),
+                     ToTensor(),
+                     Normalize([104.00698793 / 255, 
+                                116.66876762 / 255, 
+                                122.67891434 / 255],
+                               [1.0, 1.0, 1.0])
+                 ])):
+        super().__init__()
+        self.data_root = data_root
+        self.data_info = self.__prepare_data_info()
+        self.length = len(self.data_info)
+        self.transform = transform
+        print(f"{self.length} samples were loaded")
+        
+    def __len__(self):
+        return self.length
+    
+    def __getitem__(self, index):
+        path = self.data_info[index]
+        img = Image.open(path)  
+        if self.transform:
+            img = self.transform(img)
+        results = {'img': img,
+                   'name': osp.basename(path)}
+        return results
+    
+    def __prepare_data_info(self):
+        data_info = []
+        for file_name in os.listdir(self.data_root):
+            data_info.append(
+                osp.join(self.data_root, file_name))
+        return data_info
 
-torch.backends.cudnn.enabled = True # make sure to use cudnn for computational performance
 
-##########################################################
-
-arguments_strModel = 'bsds500' # only 'bsds500' for now
-arguments_strIn = './images/sample.png'
-arguments_strOut = './out.png'
-
-for strOption, strArgument in getopt.getopt(sys.argv[1:], '', [ strParameter[2:] + '=' for strParameter in sys.argv[1::2] ])[0]:
-    if strOption == '--model' and strArgument != '': arguments_strModel = strArgument # which model to use
-    if strOption == '--in' and strArgument != '': arguments_strIn = strArgument # path to the input image
-    if strOption == '--out' and strArgument != '': arguments_strOut = strArgument # path to where the output should be stored
-# end
-
-##########################################################
-
-class Network(torch.nn.Module):
+class Network(nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -89,13 +143,14 @@ class Network(torch.nn.Module):
             torch.nn.Sigmoid()
         )
 
-        self.load_state_dict({ strKey.replace('module', 'net'): tenWeight for strKey, tenWeight in torch.hub.load_state_dict_from_url(url='http://content.sniklaus.com/github/pytorch-hed/network-' + arguments_strModel + '.pytorch', file_name='hed-' + arguments_strModel).items() })
-    # end
+        self.load_state_dict(
+            {strKey.replace('module', 'net'): 
+                tenWeight for strKey, tenWeight in 
+                torch.hub.load_state_dict_from_url(
+                    url='http://content.sniklaus.com/github/pytorch-hed/network-bsds500.pytorch', 
+                        file_name='hed-bsds500').items() })
 
     def forward(self, tenInput):
-        tenInput = tenInput * 255.0
-        tenInput = tenInput - torch.tensor(data=[104.00698793, 116.66876762, 122.67891434], dtype=tenInput.dtype, device=tenInput.device).view(1, 3, 1, 1)
-
         tenVggOne = self.netVggOne(tenInput)
         tenVggTwo = self.netVggTwo(tenVggOne)
         tenVggThr = self.netVggThr(tenVggTwo)
@@ -108,42 +163,57 @@ class Network(torch.nn.Module):
         tenScoreFou = self.netScoreFou(tenVggFou)
         tenScoreFiv = self.netScoreFiv(tenVggFiv)
 
-        tenScoreOne = torch.nn.functional.interpolate(input=tenScoreOne, size=(tenInput.shape[2], tenInput.shape[3]), mode='bilinear', align_corners=False)
-        tenScoreTwo = torch.nn.functional.interpolate(input=tenScoreTwo, size=(tenInput.shape[2], tenInput.shape[3]), mode='bilinear', align_corners=False)
-        tenScoreThr = torch.nn.functional.interpolate(input=tenScoreThr, size=(tenInput.shape[2], tenInput.shape[3]), mode='bilinear', align_corners=False)
-        tenScoreFou = torch.nn.functional.interpolate(input=tenScoreFou, size=(tenInput.shape[2], tenInput.shape[3]), mode='bilinear', align_corners=False)
-        tenScoreFiv = torch.nn.functional.interpolate(input=tenScoreFiv, size=(tenInput.shape[2], tenInput.shape[3]), mode='bilinear', align_corners=False)
+        tenScoreOne = F.interpolate(input=tenScoreOne, size=tenInput.shape[2:], mode='bilinear', align_corners=False)
+        tenScoreTwo = F.interpolate(input=tenScoreTwo, size=tenInput.shape[2:], mode='bilinear', align_corners=False)
+        tenScoreThr = F.interpolate(input=tenScoreThr, size=tenInput.shape[2:], mode='bilinear', align_corners=False)
+        tenScoreFou = F.interpolate(input=tenScoreFou, size=tenInput.shape[2:], mode='bilinear', align_corners=False)
+        tenScoreFiv = F.interpolate(input=tenScoreFiv, size=tenInput.shape[2:], mode='bilinear', align_corners=False)
 
-        return self.netCombine(torch.cat([ tenScoreOne, tenScoreTwo, tenScoreThr, tenScoreFou, tenScoreFiv ], 1))
-    # end
-# end
+        combined = self.netCombine(torch.cat([tenScoreOne, tenScoreTwo, tenScoreThr, tenScoreFou, tenScoreFiv], 1))
+        
+        results = {
+            'stage_1': tenScoreOne,
+            'stage_2': tenScoreTwo,
+            'stage_3': tenScoreThr,
+            'stage_4': tenScoreFou,
+            'stage_5': tenScoreFiv,
+            'combine': combined
+        }
+        return results
 
-netNetwork = None
 
-##########################################################
-
-def estimate(tenInput):
-    global netNetwork
-
-    if netNetwork is None:
-        netNetwork = Network().cuda().eval()
-    # end
-
-    intWidth = tenInput.shape[2]
-    intHeight = tenInput.shape[1]
-
-    assert(intWidth == 480) # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
-    assert(intHeight == 320) # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
-
-    return netNetwork(tenInput.cuda().view(1, 3, intHeight, intWidth))[0, :, :, :].cpu()
-# end
-
-##########################################################
-
+def save_imgs(img: torch.Tensor, 
+              save_root: str,
+              save_name: str):
+    img = img.clip(0.0, 1.0).squeeze(1) * 255.0
+    for i in range(img.shape[0]):
+        save_img = img[i, :, :].cpu().numpy()
+        save_img = Image.fromarray(save_img.astype(np.uint8))
+        save_img.resize([256, 256])
+        save_img.save(osp.join(save_root, save_name[i]))
+    
+    
 if __name__ == '__main__':
-    tenInput = torch.FloatTensor(numpy.ascontiguousarray(numpy.array(PIL.Image.open(arguments_strIn))[:, :, ::-1].transpose(2, 0, 1).astype(numpy.float32) * (1.0 / 255.0)))
-
-    tenOutput = estimate(tenInput)
-
-    PIL.Image.fromarray((tenOutput.clip(0.0, 1.0).numpy().transpose(1, 2, 0)[:, :, 0] * 255.0).astype(numpy.uint8)).save(arguments_strOut)
-# end
+    args = parse_args()
+    if not osp.exists(args.output_path):
+        os.mkdir(args.output_path)
+    
+    torch.cuda.set_device(args.gpu_id)
+    model = Network().cuda().eval()
+    
+    if not osp.isdir(args.input_path):
+        assert f"The input path should be a " \
+            + "directory instead of {args.input_path}"
+    
+    # create dataloader
+    dataset = DummyDataset(args.input_path)
+    dataloader = DataLoader(dataset, args.batch_size,
+                            shuffle=False, num_workers=8,
+                            pin_memory=True, drop_last=False)
+    
+    with tqdm.tqdm(total=len(dataloader)) as pbar:
+        for batch_id, batch_data in enumerate(dataloader):
+            results = model(batch_data['img'].cuda())['combine']
+            save_imgs(results, args.output_path, 
+                      batch_data['name'])
+            pbar.update(1)

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import (
-    Compose, ToTensor, Resize, Normalize
+    Compose, Resize
 )
 import os
 import os.path as osp
@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument(
         '--input-path',
         type=str,
-        default='dataset/LSUN/church_outdoor/train/source')
+        default='dataset/LSUN/church_outdoor/train/src')
     parser.add_argument(
         '--output-path',
         type=str,
@@ -45,17 +45,27 @@ def parse_args():
     args = parser.parse_args()
     return args
     
+
+class Normalize:
+    def __init__(self, mean):
+        self.mean = mean
+        
+    def __call__(self, x):
+        x = np.array(x)
+        for i in range(3):
+            x[:, :, i] = x[:, :, i] - self.mean[i]
+        x = torch.tensor(x, dtype=torch.float32)
+        x = x.permute(2, 0, 1)
+        return x
+        
     
 class DummyDataset(Dataset):
     def __init__(self, data_root,
                  transform=Compose([
-                     Resize([480, 320]),
-                     ToTensor(),
-                     Normalize([104.00698793 / 255, 
-                                116.66876762 / 255, 
-                                122.67891434 / 255],
-                               [1.0, 1.0, 1.0])
-                 ])):
+                     Resize([320, 480]),
+                     Normalize([104.00698793, 
+                                116.66876762, 
+                                122.67891434])])):
         super().__init__()
         self.data_root = data_root
         self.data_info = self.__prepare_data_info()
@@ -149,7 +159,7 @@ class Network(nn.Module):
                 torch.hub.load_state_dict_from_url(
                     url='http://content.sniklaus.com/github/pytorch-hed/network-bsds500.pytorch', 
                         file_name='hed-bsds500').items() })
-
+    @torch.no_grad()
     def forward(self, tenInput):
         tenVggOne = self.netVggOne(tenInput)
         tenVggTwo = self.netVggTwo(tenVggOne)
@@ -189,17 +199,17 @@ def save_imgs(img: torch.Tensor,
     for i in range(img.shape[0]):
         save_img = img[i, :, :].cpu().numpy()
         save_img = Image.fromarray(save_img.astype(np.uint8))
-        save_img.resize([256, 256])
+        save_img = save_img.resize([256, 256])
         save_img.save(osp.join(save_root, save_name[i]))
     
     
 if __name__ == '__main__':
-    args = parse_args()
+    args = parse_args()   # 输入输出，device等
     if not osp.exists(args.output_path):
         os.mkdir(args.output_path)
     
     torch.cuda.set_device(args.gpu_id)
-    model = Network().cuda().eval()
+    model = Network().cuda().eval()   ##model从CPU to GPU,model中随机参数固定,评估
     
     if not osp.isdir(args.input_path):
         assert f"The input path should be a " \

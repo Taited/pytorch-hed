@@ -12,6 +12,7 @@ from torchvision.transforms import (
 import os
 import os.path as osp
 import tqdm
+import cv2
 
 # requires at least pytorch version 1.3.0
 assert(int(str('').join(torch.__version__.split('.')[0:2])) >= 13)
@@ -26,7 +27,7 @@ def parse_args():
     parser.add_argument(
         '--gpu-id',
         type=int,
-        default=4,
+        default=0,
         help='id of gpu to use ')
     parser.add_argument(
         '--batch-size',
@@ -57,12 +58,33 @@ class Normalize:
         x = torch.tensor(x, dtype=torch.float32)
         x = x.permute(2, 0, 1)
         return x
-        
+
+
+class HighContrast(object):
+	"""Convert ndarrays in sample to Tensors."""
+	def __init__(self):
+		pass
+
+	def __call__(self, img: Image.Image):
+		img = np.array(img)
+		lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+		# 将LAB格式分割为L、A和B通道
+		l, a, b = cv2.split(lab)
+		# 创建CLAHE对象并应用于L通道
+		clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+		cl = clahe.apply(l)
+		# 合并L、A和B通道
+		merged = cv2.merge([cl, a, b])
+		# 将LAB格式转换回BGR格式
+		result = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
+		return np.array(result)
+
     
 class DummyDataset(Dataset):
     def __init__(self, data_root,
                  transform=Compose([
                      Resize([320, 480]),
+                     HighContrast(),
                      Normalize([104.00698793, 
                                 116.66876762, 
                                 122.67891434])])):
@@ -78,10 +100,12 @@ class DummyDataset(Dataset):
     
     def __getitem__(self, index):
         path = self.data_info[index]
-        img = Image.open(path)  
+        img = Image.open(path)
+        ori_shape = img.size
         if self.transform:
             img = self.transform(img)
         results = {'img': img,
+                   'ori_size': ori_shape,
                    'name': osp.basename(path)}
         return results
     
@@ -193,13 +217,16 @@ class Network(nn.Module):
 
 
 def save_imgs(img: torch.Tensor, 
+              ori_size,
               save_root: str,
               save_name: str):
     img = img.clip(0.0, 1.0).squeeze(1) * 255.0
     for i in range(img.shape[0]):
+        w = ori_size[0][i]
+        h = ori_size[1][i]
         save_img = img[i, :, :].cpu().numpy()
         save_img = Image.fromarray(save_img.astype(np.uint8))
-        save_img = save_img.resize([256, 256])
+        save_img = save_img.resize((w, h))
         save_img.save(osp.join(save_root, save_name[i]))
     
     
@@ -224,6 +251,7 @@ if __name__ == '__main__':
     with tqdm.tqdm(total=len(dataloader)) as pbar:
         for batch_id, batch_data in enumerate(dataloader):
             results = model(batch_data['img'].cuda())['combine']
-            save_imgs(results, args.output_path, 
+            save_imgs(results, batch_data['ori_size'],
+                      args.output_path, 
                       batch_data['name'])
             pbar.update(1)

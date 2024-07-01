@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 import argparse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -37,11 +38,11 @@ def parse_args():
     parser.add_argument(
         '--input-path',
         type=str,
-        default='dataset/LSUN/church_outdoor/train/src')
+        default='/home/work/wentai/projects/AnyDoor/dataset/yoox_material_dataset/cloth')
     parser.add_argument(
         '--output-path',
         type=str,
-        default='dataset/LSUN/church_outdoor/train/edge')
+        default='/home/work/wentai/projects/AnyDoor/dataset/yoox_material_dataset/cloth-edge')
     
     args = parser.parse_args()
     return args
@@ -100,7 +101,7 @@ class DummyDataset(Dataset):
     
     def __getitem__(self, index):
         path = self.data_info[index]
-        img = Image.open(path)
+        img = Image.open(path).convert("RGB")
         ori_shape = img.size
         if self.transform:
             img = self.transform(img)
